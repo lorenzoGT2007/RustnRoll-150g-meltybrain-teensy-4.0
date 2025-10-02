@@ -150,7 +150,7 @@ void setup()
         delay(1000);
     }
 
-    accel.setRange(H3LIS331_RANGE_200_G);
+    accel.setRange(H3LIS331_RANGE_400_G);
     accel.setDataRate(LIS331_DATARATE_1000_HZ);
     sensors_event_t event;
     accel.getEvent(&event);
