@@ -1,7 +1,7 @@
 /* Notes:
 Motor dshot (edited library): 0 = full stop, 1 - 1000 spin clockwise, 1001 - 2000 spin counterclockwise
 
-max measured rpm of rust'n'roll 150g melty is 2312
+max measured rpm of rust'n'roll 150g melty is 3500rpm
 
 This code only works for motors that are 180deg apart
 
@@ -33,7 +33,8 @@ EEPROM used addresses: 0 - 3 getmaxRPM, 4 - 11 Kp, 12 - 19 Ki, 20 - 27 Kd
 #include <PID_v1.h>
 #include <InterpolationLib.h>
 
-// #define SERIALCHECK1_LOOP // all channel raw data (us) and accelerometer printed out
+// #define SERIALCHECKaccelerometer_LOOP // accelerometer values printed out
+// #define SERIALCHECKchannels_LOOP // all channel raw data (us)
 // #define SERIALCHECK2_LOOP // channels mapped data
 // #define SERIALCHECK1_SETUP // accelerometer settings and startup printed out
 // #define GETMAXRPM //Serial needs to be activated
@@ -48,13 +49,14 @@ unsigned long lastEepromWriteTest = 0;
 #endif
 
 /* values that need to be manually inserted */
-const unsigned long chosenMotorPulseWidth = 25'000;              // in millideg
+const unsigned long minChosenMotorPulseWidth = 25'000;           // in millideg, this value will be directly scaled as the RPM increases
+const unsigned long maxChosenMotorPulseWidth = 100'000;          // in millideg
 const unsigned long chosenLedWidth = 40'000;                     // in millideg
-const float radius = 0.0473;                                     // meters
-const unsigned long maxRPM = 2312;                               // max rpm that will be used during calibration, in the case of 2300 a number like 2000 as max is recommended
-const unsigned long maxCalRPM = 2000;                            // max rpm for calibration
+double radius = 0.0473;                                          // meters
+const unsigned long maxRPM = 3500;                               // max goal rpm that will be used for full ch3 throttle, in the case of 2300 a number like 2000 as max is recommended
+const unsigned long maxCalRPM = 2500;                            // max rpm for calibration
 const unsigned long minCalRPM = 1000;                            // min rpm for calibration
-const unsigned minTimeBetweenActivations = 100;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
+const unsigned minTimeBetweenActivations = 150;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
 const unsigned long periodUsISR = 100;                           // period that sets the frequency of the isr for motor throttle
 const long recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
@@ -82,7 +84,7 @@ long previousCh4Value = 0;
 double calRangeRPM = maxCalRPM - minCalRPM;
 uint8_t PIDcoeff = 1;
 uint8_t calPoint = 1;
-int driftCalibrationMap = 0;
+bool failsafeOn = false;
 
 /* PID library */
 double RPMgoal;     // your setpoint
@@ -140,7 +142,7 @@ void updateThrottle()
 void setup()
 {
 
-#if defined(SERIALCHECK1_LOOP) || defined(SERIALCHECK2_LOOP) || defined(SERIALCHECK1_SETUP) || defined(GETMAXRPM) || defined(LOOPFREQUENCY) || defined(SERIALCHECKPID) || defined(SERIALCHECKDEGCAL)
+#if defined(SERIALCHECKchannels_LOOP) || defined(SERIALCHECK2_LOOP) || defined(SERIALCHECK1_SETUP) || defined(GETMAXRPM) || defined(LOOPFREQUENCY) || defined(SERIALCHECKPID) || defined(SERIALCHECKDEGCAL)
     Serial.begin(115200);
 #endif
 
@@ -167,7 +169,7 @@ void setup()
     aggKi = consKi * 1.2;
     aggKd = consKd * 1.2;
     myPID.SetMode(AUTOMATIC);       // turn PID on
-    myPID.SetOutputLimits(0, 1000); // limit output to motor range
+    myPID.SetOutputLimits(1, 1000); // limit output to motor range
 
     for (uint8_t i = 0; i < numberOfPoints - 1; i++) // read the calibrated values skipping the first one that will always be zero
     {
@@ -301,6 +303,7 @@ void readReceiver()
     ChannelNumber = ReceiverInput.available();
     if (ChannelNumber > 0)
     {
+        failsafeOn = false;
         for (int i = 1; i <= ChannelNumber; i++)
         {
             receiverValue[i - 1] = ReceiverInput.read(i);
@@ -312,12 +315,13 @@ void readReceiver()
     {
         if (millis() - failsafeTimer > 1000) // if no signal is detected for more than a tot of ms failsafe is activated
         {
+            failsafeOn = true;
             failsafe();
         }
     }
 }
 
-int convertThrottle(int speed) // converts throttle for dshot library. input is from -1000 to 1000, output if from 0 to 2000 for dshot library. 0 sends the full stop command
+int convertThrottle(int speed) // converts throttle for dshot library. input is from -1000 to 1000, output from 0 to 2000 for dshot library. 0 sends the full stop command
 {
     if (speed == 0)
     {
@@ -431,8 +435,15 @@ void loop()
     if (ch3Value == 0) // tank mode, CH3 is deadbanded for the first 5 values so they result in 0
     {
         mixEscSignals(ch1Value, ch2Value);
-        digitalWrite(pinLED, LOW);
-        delayMicroseconds(500); // slow down the loop, speed is not required in this case
+        if (failsafeOn == true)// if failsafe is on the led is always off
+        {
+            digitalWrite(pinLED, LOW); // LED always on in tank mode
+        }
+        else
+        {
+            digitalWrite(pinLED, HIGH); // LED always on in tank mode
+        }
+        delayMicroseconds(1000); // slow down the loop, speed is not required in this case
 
         noInterrupts();
         throttle1 = convertThrottle(-ch1Value); // changing the sign inverts the motor
@@ -451,9 +462,8 @@ void loop()
         {
             if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
             {
-                driftCalibrationMap = map(receiverValue[4], 1000, 2000, -200, 200); // apply the mapped drift calibration
+                radius = fmap(receiverValue[4], 1000, 2000, 0.02, 0.07); // edit the radius size, since the only variable that can add a costant drift is the radius when calculating angular velocity
             }
-            deltaDeg += driftCalibrationMap;                   // 1 deg = 1'000'000 microdeg.
             deltaDeg += map(ch1Value, -1000, 1000, 100, -100); // directional led stick control
             lastTimeDrift = now;
         }
@@ -532,7 +542,7 @@ void loop()
             switch (PIDcoeff) // map pid coefficient to calibration potentiometer (same used for motor)
             {
             case 1:
-                consKp = fmap(receiverValue[4], 1000, 2000, 0, 10);
+                consKp = fmap(receiverValue[4], 1000, 2000, 0, 10); // in PID Kp defines how aggressively the PID reacts to the current error with respect to the setpoint
                 aggKp = consKp * 1.6;
                 ledWidth = 180'000;
                 consKi = 0;
@@ -541,12 +551,12 @@ void loop()
                 aggKd = 0;
                 break;
             case 2:
-                consKi = fmap(receiverValue[4], 1000, 2000, 0, 50);
+                consKi = fmap(receiverValue[4], 1000, 2000, 0, 50); // in PID Ki defines how aggressively the PID reacts to the sum of all previous errors with respect to the setpoint
                 aggKi = consKi * 1.2;
                 ledWidth = 90'000;
                 break;
             case 3:
-                consKd = fmap(receiverValue[4], 1000, 2000, 0, 10);
+                consKd = fmap(receiverValue[4], 1000, 2000, 0, 10); // in PID Kd defines how aggressively the PID reacts to the prediction of future errors with respect to the setpoint
                 aggKd = consKd * 1.2;
                 ledWidth = 10'000;
                 break;
@@ -572,12 +582,14 @@ void loop()
         }
 
         /* Deciding if the motor should be on or off */
-        unsigned long motorsCalibrationDeg = Interpolation::Linear(calRPM, calDeg, numberOfPoints, RPM, true); //(x values, y values, number of points, x value to find the corresponding y, no extrapolation if true)
-        unsigned long motorActivation = (360000UL - (motorsCalibrationDeg % 360000UL)) % 360000UL;             // defining motor activation
-        if(ch2Value < 0){
-            motorActivation = (motorActivation + 180000UL) % 360000UL; //motor activation is 180 deg later so it goes in reverse
+        unsigned long motorPulseWidth = map(RPM, 0, maxRPM, minChosenMotorPulseWidth, maxChosenMotorPulseWidth); // motor pulse width mapped to the current RPM
+        unsigned long motorsCalibrationDeg = Interpolation::Linear(calRPM, calDeg, numberOfPoints, RPM, true);   //(x values, y values, number of points, x value to find the corresponding y, no extrapolation if true)
+        unsigned long motorActivation = (360000UL - (motorsCalibrationDeg % 360000UL)) % 360000UL;               // defining motor activation
+        if (ch2Value < 0)
+        {
+            motorActivation = (motorActivation + 180000UL) % 360000UL; // motor activation is 180 deg later so it goes in reverse
         }
-        unsigned long motorEnd = (motorActivation + chosenMotorPulseWidth) % 360000UL;                         // defining motor activation end
+        unsigned long motorEnd = (motorActivation + motorPulseWidth) % 360000UL; // defining motor activation end
 
         if (motorActivation < motorEnd) // this if statement decides if the motor is in its activation range
         {
@@ -634,7 +646,6 @@ void loop()
         /* chose to activate motor based on receiver input */
         int signal1;
         int signal2;
-
         if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
         {
             signal1 = motorOutput;
@@ -718,21 +729,9 @@ void loop()
     Serial.print(ch4Value);
     Serial.print("  ch4Value      \r ");
 #endif
-#ifdef SERIALCHECK1_LOOP
-    // Display the results (acceleration is measured in m/s^2)
-    delay(50);
-    /*
-    sensors_event_t event;
-    accel.getEvent(&event);
-    Serial.print("\t\tX: ");
-    Serial.print(event.acceleration.x);
-    Serial.print(" \tY: ");
-    Serial.print(event.acceleration.y);
-    Serial.print(" \tZ: ");
-    Serial.print(event.acceleration.z);
-    Serial.print(" m/s^2    ");
-    */
+#ifdef SERIALCHECKchannels_LOOP
 
+    delay(50);
     Serial.print("      Number of channels: ");
     Serial.print(ChannelNumber);
     Serial.print("     CH1 [µs]: ");
@@ -752,6 +751,20 @@ void loop()
     Serial.print("     CH8 [µs]: ");
     Serial.print(receiverValue[7]);
     Serial.print("\r");
+
+#endif
+#ifdef SERIALCHECKaccelerometer_LOOP
+    delay(50);
+
+    sensors_event_t event;
+    accel.getEvent(&event);
+    Serial.print("\t\tX: ");
+    Serial.print(event.acceleration.x);
+    Serial.print(" \tY: ");
+    Serial.print(event.acceleration.y);
+    Serial.print(" \tZ: ");
+    Serial.print(event.acceleration.z);
+    Serial.print(" m/s^2    \r");
 #endif
 #ifdef LOOPFREQUENCY
     unsigned long elapsedtime = micros() - start;
