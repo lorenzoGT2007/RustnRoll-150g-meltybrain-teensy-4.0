@@ -56,7 +56,7 @@ double radius = 0.0473;                                          // meters
 const unsigned long maxRPM = 3500;                               // max goal rpm that will be used for full ch3 throttle, in the case of 2300 a number like 2000 as max is recommended
 const unsigned long maxCalRPM = 2500;                            // max rpm for calibration
 const unsigned long minCalRPM = 1000;                            // min rpm for calibration
-const unsigned minTimeBetweenActivations = 150;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
+const unsigned minTimeBetweenActivations = 500;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
 const unsigned long periodUsISR = 100;                           // period that sets the frequency of the isr for motor throttle
 const long recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
@@ -85,6 +85,7 @@ double calRangeRPM = maxCalRPM - minCalRPM;
 uint8_t PIDcoeff = 1;
 uint8_t calPoint = 1;
 bool failsafeOn = false;
+bool reversed = false;
 
 /* PID library */
 double RPMgoal;     // your setpoint
@@ -435,7 +436,7 @@ void loop()
     if (ch3Value == 0) // tank mode, CH3 is deadbanded for the first 5 values so they result in 0
     {
         mixEscSignals(ch1Value, ch2Value);
-        if (failsafeOn == true)// if failsafe is on the led is always off
+        if (failsafeOn == true) // if failsafe is on the led is always off
         {
             digitalWrite(pinLED, LOW); // LED always on in tank mode
         }
@@ -464,7 +465,15 @@ void loop()
             {
                 radius = fmap(receiverValue[4], 1000, 2000, 0.02, 0.07); // edit the radius size, since the only variable that can add a costant drift is the radius when calculating angular velocity
             }
-            deltaDeg += map(ch1Value, -1000, 1000, 100, -100); // directional led stick control
+
+            if (reversed == true)
+            {
+                deltaDeg += map(ch1Value, -1000, 1000, 100, -100); // directional led stick control
+            }
+            else
+            {
+                deltaDeg -= map(ch1Value, -1000, 1000, 100, -100);
+            }
             lastTimeDrift = now;
         }
 
@@ -633,7 +642,7 @@ void loop()
         /* Decide to use aggressive PID or conservative PID */
         RPMgoal = map(ch3Value, 0, 1000, 0, maxRPM);
         double gap = abs(RPMgoal - RPM);
-        if (gap < 100)
+        if (gap < 200)
         { // close to setpoint
             myPID.SetTunings(consKp, consKi, consKd);
         }
@@ -648,11 +657,13 @@ void loop()
         int signal2;
         if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
         {
+            reversed = false;
             signal1 = motorOutput;
             signal2 = motorOutput;
         }
         else
         {
+            reversed = true;
             signal1 = -motorOutput;
             signal2 = -motorOutput;
         }
