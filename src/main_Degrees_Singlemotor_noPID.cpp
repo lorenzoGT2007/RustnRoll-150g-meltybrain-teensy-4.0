@@ -7,7 +7,7 @@ This code only works for motors that are 180deg apart
 
 channel mixing code source: https://www.instructables.com/Understanding-Channel-Mixing/
 
-ch3 is the rpm control, ch1 and ch2 are the directional controls, ch4 is for calibration and ch5 is for the radius calibration that corrects drift. 
+ch3 is the rpm control, ch1 and ch2 are the directional controls, ch4 is for calibration and ch5 is for the radius calibration that corrects drift.
 ch6 is for selecting the direction of spin in spin mode
 
 Data Type Sizes on Teensy 4.0 (ARM Cortex-M7)
@@ -32,7 +32,6 @@ EEPROM used addresses: 0 - 3 getmaxRPM, 4 - 11 Kp, 12 - 19 Ki, 20 - 27 Kd
 #include <Adafruit_Sensor.h>
 #include <DShot.h>
 #include <math.h>
-#include <PID_v1.h>
 #include <InterpolationLib.h>
 
 // #define SERIALCHECKaccelerometer_LOOP // accelerometer values printed out
@@ -41,8 +40,8 @@ EEPROM used addresses: 0 - 3 getmaxRPM, 4 - 11 Kp, 12 - 19 Ki, 20 - 27 Kd
 // #define SERIALCHECK1_SETUP // accelerometer settings and startup printed out
 // #define GETMAXRPM //Serial needs to be activated
 // #define LOOPFREQUENCY  //write loop frequency in serial
-// #define SERIALCHECKPID // write saved pid settings in serial
 // #define SERIALCHECKDEGCAL //write calibrated deg values in serial
+// #define MOTOR_OUTPUT // check the motor output value for debugging
 
 #ifdef GETMAXRPM
 bool firstRun = true;
@@ -52,7 +51,7 @@ unsigned long lastEepromWriteTest = 0;
 
 /* values that need to be manually inserted */
 const unsigned long minChosenMotorPulseWidth = 25'000;           // in millideg, this value will be directly scaled as the RPM increases
-const unsigned long maxChosenMotorPulseWidth = 100'000;          // in millideg
+const unsigned long maxChosenMotorPulseWidth = 360'000;          // in millideg
 const unsigned long chosenLedWidth = 40'000;                     // in millideg
 double radius = 0.0473;                                          // meters
 const unsigned long maxRPM = 3500;                               // max goal rpm that will be used for full ch3 throttle, in the case of 2300 a number like 2000 as max is recommended
@@ -89,14 +88,9 @@ uint8_t calPoint = 1;
 bool failsafeOn = false;
 bool reversed = false;
 
-/* PID library */
-double RPMgoal;     // your setpoint
-double RPM;         // measured RPM from sensor
-double motorOutput; // PID output, 0..1000
-
-double consKp = 0, consKi = 0, consKd = 0;                               // conservative tuning when close to the desired range
-double aggKp = 0, aggKi = 0, aggKd = 0;                                  // aggressive tuning when far from the desired range
-PID myPID(&RPM, &motorOutput, &RPMgoal, consKp, consKi, consKd, DIRECT); // initializing PID parameters
+/* RPM and motor output */
+double RPM;       // measured RPM from sensor
+long motorOutput; // ch3Value mapped for output
 
 /* Point interpolation library */
 const uint8_t numberOfPoints = 5;                                                                                                                    // number of points
@@ -136,6 +130,7 @@ int ChannelNumber = 0;
 /* interrupt function for motor throttle */
 volatile uint16_t throttle1 = 1048;
 volatile uint16_t throttle2 = 1048;
+
 void updateThrottle()
 {
     ESC1.sendThrottle(throttle1, false); // 0 min to 2000 max. the first 48 values are for esc setup. center value between min and max is 1000
@@ -164,15 +159,6 @@ void setup()
     digitalWrite(pinLED, LOW);
 
     ReceiverInput.begin(pinCH1); // begin communication with receiver
-
-    EEPROM.get(4, consKp);
-    EEPROM.get(12, consKi);
-    EEPROM.get(20, consKd);
-    aggKp = consKp * 1.6; // aggressive tuning when far from the desired range
-    aggKi = consKi * 1.2;
-    aggKd = consKd * 1.2;
-    myPID.SetMode(AUTOMATIC);       // turn PID on
-    myPID.SetOutputLimits(1, 1000); // limit output to motor range
 
     for (uint8_t i = 0; i < numberOfPoints - 1; i++) // read the calibrated values skipping the first one that will always be zero
     {
@@ -204,16 +190,6 @@ void setup()
             delay(100);
         }
     }
-
-#ifdef SERIALCHECKPID
-    delay(10000); // wait so the user have time to connect to serial once turned on
-    Serial.print(consKp);
-    Serial.print(" consKp          ");
-    Serial.print(consKi);
-    Serial.print(" consKi          ");
-    Serial.print(consKd);
-    Serial.print(" consKd          \r");
-#endif
 
 #ifdef GETMAXRPM
     delay(10000); // wait so you have time to connect to serial once turned on
@@ -341,7 +317,11 @@ int convertThrottle(int speed) // converts throttle for dshot library. input is 
 int processChannelValue(int CH, int min, int max)
 {
     CH = map(CH, 1000, 2000, min, max); // map for convertThrottle function
-    CH = (abs(CH) <= 10) ? 0 : CH;      // signal deadband when in neutral position
+
+    if (abs(CH) <= 10) // signal deadband when in neutral position
+    {
+        CH = 0;
+    }
     CH = constrain(CH, min, max);
     return CH;
 }
@@ -405,10 +385,11 @@ double fmap(long x, long in_min, long in_max, double out_min, double out_max)
 // Function to update LED width based on RPM and calibration point
 void updateLedWidthCal(double desiredRPM)
 {
-   double difference = fabs(desiredRPM - RPM); //the closer it gets to the desired range the smaller the number becomes
-   difference = constrain(difference, 0, maxRPM - maxRPM/3); // constrain the difference so maxrpm - maxrpm/3. this is an arbitrary value
-   ledWidth = map(difference, 0, maxRPM - maxRPM/3, 30'000, 360'000); // the bigger the difference the wider it gets, when on the value it reaches 10 degrees minum of width
+    double difference = fabs(desiredRPM - RPM);                          // the closer it gets to the desired range the smaller the number becomes
+    difference = constrain(difference, 0, maxRPM - maxRPM / 3);          // constrain the difference so maxrpm - maxrpm/3. this is an arbitrary value
+    ledWidth = map(difference, 0, maxRPM - maxRPM / 3, 30'000, 360'000); // the bigger the difference the wider it gets, when on the value it reaches 10 degrees minum of width
 }
+
 void loop()
 {
 #ifdef LOOPFREQUENCY
@@ -427,7 +408,7 @@ void loop()
         mixEscSignals(ch1Value, ch2Value);
         if (failsafeOn == true) // if failsafe is on the led is always off
         {
-            digitalWrite(pinLED, LOW); 
+            digitalWrite(pinLED, LOW);
         }
         else
         {
@@ -440,7 +421,7 @@ void loop()
         throttle2 = convertThrottle(ch2Value);
         interrupts();
     }
-    else if (ch3Value > 0 && ch3Value <= 1000) // spin mode
+    else // spin mode
     {
         deltaDeg = angularVariation();     // in microdegrees
         RPM = 60.0 * 1000000.0 / periodUs; // periodUs is computed inside angular variation         RPM = 60.0 * 1000000.0 / periodUs;
@@ -498,8 +479,8 @@ void loop()
             {
                 calPoint++;
             }
-            
-            updateLedWidthCal(calRPM[calPoint]);                                 // desired rpm where LED line will get shorter and the other value is the +-range
+
+            updateLedWidthCal(calRPM[calPoint]);                                     // desired rpm where LED line will get shorter and the other value is the +-range
             motorsCalibrationDegRaw = map(receiverValue[4], 1000, 2000, 0, 360'000); // delay in degrees manually assigned at a certain rpm range
             calDeg[calPoint] = motorsCalibrationDegRaw;                              // assign the deg value to the current point that is being calibrated
 
@@ -519,64 +500,6 @@ void loop()
         {
             degCalibration = false;
             degCalibratingNow = false;
-        }
-
-        /* PID Manual Calibration */
-        unsigned long nowCalibrationDegPID = millis();
-        if (ch4Value > 50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
-        {
-            PIDCalibration = true;
-            startCalibrationDegPID = nowCalibrationDegPID;
-        }
-
-        if (nowCalibrationDegPID - startCalibrationDegPID > 3000 && PIDCalibration == true) // if the switch stays in the PID calibration start range for more than 3 seconds calibration starts
-        {
-            PIDcalibratingNow = true;
-            if (abs(ch4Value - previousCh4Value) > 50) // start calibrating next PID coefficient only if ch4Value changed more than 50, so there's a little bit of play
-            {
-                PIDcoeff++;
-            }
-
-            switch (PIDcoeff) // map pid coefficient to calibration potentiometer (same used for motor)
-            {
-            case 1:
-                consKp = fmap(receiverValue[4], 1000, 2000, 0, 10); // in PID Kp defines how aggressively the PID reacts to the current error with respect to the setpoint
-                aggKp = consKp * 1.6;
-                ledWidth = 180'000;
-                consKi = 0;
-                consKd = 0;
-                aggKi = 0;
-                aggKd = 0;
-                break;
-            case 2:
-                consKi = fmap(receiverValue[4], 1000, 2000, 0, 50); // in PID Ki defines how aggressively the PID reacts to the sum of all previous errors with respect to the setpoint
-                aggKi = consKi * 1.2;
-                ledWidth = 90'000;
-                break;
-            case 3:
-                consKd = fmap(receiverValue[4], 1000, 2000, 0, 10); // in PID Kd defines how aggressively the PID reacts to the prediction of future errors with respect to the setpoint
-                aggKd = consKd * 1.2;
-                ledWidth = 10'000;
-                break;
-            default:
-                PIDcalibratingNow = false;
-                PIDCalibration = false;
-                PIDcoeff = 1;
-                EEPROM.put(4, consKp);
-                EEPROM.put(12, consKi);
-                EEPROM.put(20, consKd);
-                break;
-            }
-        }
-        else if (ch4Value < 50 && PIDcalibratingNow == false) // if the first "if" is waiting for the timer to be true but the ch4 changes everything resets
-        {
-            PIDCalibration = false;
-        }
-
-        previousCh4Value = ch4Value;
-        if (!degCalibratingNow && !PIDcalibratingNow) // if none of the calibrations are running use the standard led width
-        {
-            ledWidth = chosenLedWidth;
         }
 
         /* Deciding if the motor should be on or off */
@@ -628,33 +551,18 @@ void loop()
             motorActive = false;
         }
 
-        /* Decide to use aggressive PID or conservative PID */
-        RPMgoal = map(ch3Value, 0, 1000, 0, maxRPM);
-        double gap = abs(RPMgoal - RPM);
-        if (gap < 200)
-        { // close to setpoint
-            myPID.SetTunings(consKp, consKi, consKd);
-        }
-        else
-        { // far from setpoint
-            myPID.SetTunings(aggKp, aggKi, aggKd);
-        }
-        myPID.Compute(); // calculate the correct motorOutput value
-
         /* chose to activate motor based on receiver input */
-        int signal1;
-        int signal2;
+        int signal2 = ch3Value; //it is mapped from 0 to 1000 so it is rotating only in a single direction
+        int signal1 = signal2;
         if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
         {
             reversed = false;
-            signal1 = motorOutput;
-            signal2 = motorOutput;
         }
         else
         {
             reversed = true;
-            signal1 = -motorOutput;
-            signal2 = -motorOutput;
+            signal1 = -signal1;
+            signal2 = -signal2;
         }
 
         if (motorActive && ch2Value != 0) // Decide signals for translation motor
@@ -773,5 +681,12 @@ void loop()
     Serial.print("  frequency          ");
     Serial.print(elapsedtime);
     Serial.print("  elapsed time      \r ");
+#endif
+#ifdef MOTOR_OUTPUT
+    delay(50);
+    Serial.print(throttle1);
+    Serial.print("  throttle1       ");
+    Serial.print(throttle2);
+    Serial.println("  throttle2   ");
 #endif
 }
