@@ -421,7 +421,7 @@ void loop()
         throttle2 = convertThrottle(ch2Value);
         interrupts();
     }
-    else // spin mode
+    else if (ch3Value > 0 && ch3Value <= 1000) // spin mode, the last else is for failsafe
     {
         deltaDeg = angularVariation();     // in microdegrees
         RPM = 60.0 * 1000000.0 / periodUs; // periodUs is computed inside angular variation         RPM = 60.0 * 1000000.0 / periodUs;
@@ -552,7 +552,7 @@ void loop()
         }
 
         /* chose to activate motor based on receiver input */
-        int signal2 = ch3Value; //it is mapped from 0 to 1000 so it is rotating only in a single direction
+        int signal2 = ch3Value; // it is mapped from 0 to 1000 so it is rotating only in a single direction
         int signal1 = signal2;
         if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
         {
@@ -596,36 +596,13 @@ void loop()
         }
 #endif
     }
-/*
-    Serial.print("calPoint=");
-    Serial.print(calPoint);
-    Serial.print(" RPM=");
-    Serial.print(RPM);
-    Serial.print(" desiredRPM=");
-    Serial.print(calRPM[calPoint]);
-    Serial.print(" min=");
-    Serial.print(calRPM[calPoint] - 50.0);
-    Serial.print(" max=");
-    Serial.print(calRPM[calPoint] + 50.0);
-    Serial.print(" ledWidth=");
-    Serial.print(ledWidth);
-    Serial.print("        ");
-    Serial.print(calDeg[0]);
-    Serial.print(" slot 0     ");
-    Serial.print(calDeg[1]);
-    Serial.print(" slot 1     ");
-    Serial.print(calDeg[2]);
-    Serial.print(" slot 2     ");
-    Serial.print(calDeg[3]);
-    Serial.print(" slot 3     ");
-    Serial.print(calDeg[4]);
-    Serial.print(" slot 4     ");
-    Serial.print(degCalibratingNow);
-    Serial.print(" degCalibratingNow     ");
-    Serial.print(degCalibration);
-    Serial.println(" degcalibration    ");
-    delay(50);
-*/
+    else // safety stop without any esc signal on ch3 using PPM
+    {
+        noInterrupts();
+        throttle1 = 0;
+        throttle2 = 0;
+        interrupts();
+    }
 #ifdef SERIALCHECK2_LOOP
     delay(50);
     Serial.print(ch2Value);
