@@ -60,35 +60,38 @@ const unsigned long maxCalRPM = 2500;                            // max rpm for 
 const unsigned long minCalRPM = 1000;                            // min rpm for calibration
 const unsigned minTimeBetweenActivations = 500;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
 const unsigned long periodSecondsISR = 100;                      // period that sets the frequency of the isr for motor throttle
-const long recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
+const int recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
 /* global variables */
+bool degCalibration = false;
+bool degCalibratingNow = false;
+bool PIDCalibration = false;
+bool PIDcalibratingNow = false;
+bool failsafeOn = false;
+bool reversed = false;
+bool peakReached = false;
+
+int targetThrottle = 0;
+int lastMotorDerivative = 0;
+int previousCh4Value = 0;
+
+uint8_t PIDcoeff = 1;
+uint8_t calPoint = 1;
+
+unsigned int lastMotorActivation = 0;
+
 unsigned long failsafeTimer = 0;
-double ledWidth = chosenLedWidth;
-double deltaDeg = 0;
-double angPos = 0;
-bool motorActivationOngoing = false;
-double periodSeconds = 0;
 unsigned long initialMicros = 0;
 unsigned long lastTimeDrift = 0;
 unsigned long startCalibrationDeg = 0;
-bool degCalibration = false;
-bool degCalibratingNow = false;
-double motorsCalibrationDegRaw = 0;
-unsigned long lastMotorActivation = 0;
-bool motorBrakingNow = false;
-bool preventBrakingChopping = true;
-bool previousMotorState = motorBrakingNow;
-bool PIDCalibration = false;
-bool PIDcalibratingNow = false;
 unsigned long startCalibrationDegPID = 0;
-long previousCh4Value = 0;
+
+double ledWidth = chosenLedWidth;
+double deltaDeg = 0;
+double angPos = 0;
+double periodSeconds = 0;
+double motorsCalibrationDegRaw = 0;
 double calRangeRPM = maxCalRPM - minCalRPM;
-uint8_t PIDcoeff = 1;
-uint8_t calPoint = 1;
-bool failsafeOn = false;
-bool reversed = false;
-int targetThrottle = 0;
 
 /* constants */
 const double SQRT2 = 1.41421356;
@@ -128,14 +131,14 @@ DShot ESC2(&Serial4, DShotType::DShot600);
 IntervalTimer sendThrottle;
 
 /* esc signal variables */
-long ch1Value = 0;
-long ch2Value = 0;
-long ch3Value = 0;
-long ch4Value = 0;
+int ch1Value = 0;
+int ch2Value = 0;
+int ch3Value = 0;
+int ch4Value = 0;
 
 /* PPM communication object definition */
 PulsePositionInput ReceiverInput(RISING);
-long receiverValue[] = {0, 0, 0, 0, 0, 0, 0, 0}; // array for channels values
+int receiverValue[] = {0, 0, 0, 0, 0, 0, 0, 0}; // array for channels values
 int ChannelNumber = 0;
 
 /* interrupt function for motor throttle */
@@ -442,6 +445,12 @@ void loop()
     }
     delayMicroseconds(1000); // slow down the loop, speed is not required in this case
 
+    if (receiverValue[5] < 1500) // motors are reversed with a switch, when the robot flips over
+    {
+      ch1Value = -ch1Value;
+      ch2Value = -ch2Value;
+    }
+
     noInterrupts();
     throttle1 = convertThrottle(-ch1Value); // changing the sign inverts the motor
     throttle2 = convertThrottle(ch2Value);
@@ -638,13 +647,36 @@ void loop()
     }
     */
 
-    /* Timer that stops any motor activation for a chosen amount of ms so translation can be faster or slower*/
-    if (motorThrottle <= 0) //needed later to prevent chopping when the sine wave is used
+    /* Timer that stops any motor activation for a chosen amount of ms so translation can be faster or slower
+
+     It will check the value of the derivative of the sinewave if the amout of time between activations has passed.
+     If the value goes from positive from negative, so when a peak is reached, it will start using the sinusoidal modulation.
+     If the next loops the timer still meets the condition it will keep using the sinusoidal modulation, otherwise it will stop once a peak is reached and wait for the next timer to be satisfied, once satisfied it will wait for a peak again
+    */
+    int motorThrottleDerivative = maxMotorThrottle * cos((angPos - motorsCalibrationDegRaw) * PI / 180.0); // derivative of motorThrottle to know when the peak is reached, this is when the sinusoidal modulation will be used for tra
+    unsigned int TimeBetweenActivations = map(std::abs(ch2Value), 0, 1000, minTimeBetweenActivations, 0);  // send more activations if the ch2 value is bigger
+    unsigned int motorTimeNow = millis();
+    unsigned int elapsedMotorTime = motorTimeNow - lastMotorActivation;
+    if (elapsedMotorTime > TimeBetweenActivations) // if enough time has passed since last activation
     {
-      motorBrakingNow = true;
+      if (lastMotorDerivative >= 0 && motorThrottleDerivative < 0) // if the peak of the sinusoidal modulation is reached, this means that the motor is in the best position to be activated for a translation aka using sinusoidal modulation
+      {
+        if(peakReached == true){
+          lastMotorActivation = motorTimeNow; 
+        }
+        peakReached = true;
+      }
+      if (peakReached == false) //sinusoidal modulation will be used only when a positive peak is reached, otherwise it will be overwritten with the throttle
+      {
+        motorThrottle = targetThrottle;
+      }
     }
-    unsigned int TimeBetweenActivations = map(std::abs(ch2Value), 0, 1000, minTimeBetweenActivations, 0); // send more activations if the ch2 value is bigger
-   
+    else
+    {
+      peakReached = false;
+      motorThrottle = targetThrottle; // if the time condition is not respected the motor throttle is set to the target throttle without sinusoidal modulation, this means that the motor will be activated even if it is not in the best position for translation but this allows to have more activations and therefore more control over the robot, at the cost of some efficiency
+    }
+
     /* reverse the rotation direction */
     int signal2 = motorThrottle; // it is mapped from 0 to 1000 so it is rotating only in a single direction
     int signal1 = signal2;
