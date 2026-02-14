@@ -46,8 +46,8 @@ EEPROM used addresses: 0-3 getmaxRPM (4 Byte), 4-11 Kp (8B), 12-19 Ki (8B), 20-2
 
 #ifdef GETMAXRPM
 bool firstRun = true;
-unsigned long previousPeriodTest = 0;
-unsigned long lastEepromWriteTest = 0;
+unsigned int previousPeriodTest = 0;
+unsigned int lastEepromWriteTest = 0;
 #endif
 
 /* values that need to be manually inserted */
@@ -56,10 +56,10 @@ const double maxChosenMotorPulseWidth = 180.0;                   // in degrees, 
 const double chosenLedWidth = 40.0;                              // in degrees
 double radius = 0.0473;                                          // meters, this is not a constant because it is used as a calibration value for the led drift
 const double maxRPM = 3500.0;                                    // max goal rpm that will be used for full ch3 throttle, in the case of 2300 a number like 2000 as max is recommended
-const unsigned long maxCalRPM = 2500;                            // max rpm for calibration
-const unsigned long minCalRPM = 1000;                            // min rpm for calibration
-const unsigned minTimeBetweenActivations = 500;                  // in ms, it's the min time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
-const unsigned long periodSecondsISR = 100;                      // period that sets the frequency of the isr for motor throttle
+const unsigned int maxCalRPM = 2500;                            // max rpm for calibration
+const unsigned int minCalRPM = 1000;                            // min rpm for calibration
+const unsigned int maxTimeBetweenActivations = 500;             // in ms, it's the max time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
+const unsigned int periodSecondsISR = 100;                      // period that sets the frequency of the isr for motor throttle
 const int recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
 /* global variables */
@@ -79,12 +79,11 @@ uint8_t PIDcoeff = 1;
 uint8_t calPoint = 1;
 
 unsigned int lastMotorActivation = 0;
-
-unsigned long failsafeTimer = 0;
-unsigned long initialMicros = 0;
-unsigned long lastTimeDrift = 0;
-unsigned long startCalibrationDeg = 0;
-unsigned long startCalibrationDegPID = 0;
+unsigned int failsafeTimer = 0;
+unsigned int initialMicros = 0;
+unsigned int lastTimeDrift = 0;
+unsigned int startCalibrationDeg = 0;
+unsigned int startCalibrationDegPID = 0;
 
 double ledWidth = chosenLedWidth;
 double deltaDeg = 0;
@@ -185,7 +184,7 @@ void setup()
 
   for (uint8_t i = 0; i < numberOfPoints - 1; i++) // read the calibrated values skipping the first one that will always be zero
   {
-    unsigned long EEPROMStartAddress = 28;
+    unsigned int EEPROMStartAddress = 28;
     EEPROM.get(EEPROMStartAddress + i * sizeof(calDeg[0]), calDeg[i + 1]); // write the eeprom values into the corresponding calDeg arrays
 
 #ifdef SERIALCHECKDEGCAL
@@ -223,7 +222,7 @@ void setup()
 #ifdef GETMAXRPM
   delay(10000); // wait so you have time to connect to serial once turned on
   EEPROM.get(0, periodSeconds);
-  unsigned long rpm = 60.0 * 1000000.0 / periodSeconds;
+  unsigned int rpm = 60.0 * 1000000.0 / periodSeconds;
   Serial.print(rpm);
   Serial.print(" rpm    ");
   Serial.print(periodSeconds);
@@ -399,8 +398,8 @@ double angularVariation()
 
   periodSeconds = (2.0 * PI / angVelocity); // periodSeconds = 2π / angVelocity. for seconds per revolution.
 
-  unsigned long now = micros();
-  unsigned long deltaMicros = now - initialMicros;
+  unsigned int now = micros();
+  unsigned int deltaMicros = now - initialMicros;
   initialMicros = now;
   double deltaSeconds = deltaMicros * 1e-6;
   return angVelocity * deltaSeconds * (180.0 / PI); // degrees
@@ -422,7 +421,7 @@ void updateLedWidthCal(double desiredRPM)
 void loop()
 {
 #ifdef LOOPFREQUENCY
-  unsigned long start = micros();
+  unsigned int start = micros();
 #endif
 
   readReceiver(); // read and store reciever channel values
@@ -471,8 +470,8 @@ void loop()
     }
 
     /* Angular position drift calibration and directional LED stick control */
-    unsigned long now = micros();
-    unsigned long driftFreq = periodSeconds / 200; // how many times every rotation it will be applied. if the loop runs at 10kHz and the robot is at 200rpm you get a max of 300 frames per revolution
+    unsigned int now = micros();
+    unsigned int driftFreq = periodSeconds / 200; // how many times every rotation it will be applied. if the loop runs at 10kHz and the robot is at 200rpm you get a max of 300 frames per revolution
     if (now - lastTimeDrift > driftFreq)           // drift calibration needs to be in function of rotations. so every rotation a certain amout of degrees is added/subtracted
     {
       if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
@@ -509,7 +508,7 @@ void loop()
     }
 
     /* Motor advance manual calibration */
-    unsigned long nowCalibrationDeg = millis();
+    unsigned int nowCalibrationDeg = millis();
     if (ch4Value >= -50 && ch4Value <= 50 && degCalibration == false && PIDcalibratingNow == false)
     {
       degCalibration = true;
@@ -535,7 +534,7 @@ void loop()
         calPoint = 1;
         for (uint8_t i = 0; i < numberOfPoints - 1; i++) // write the 4 calibrated value skipping the first one that will always be zero
         {
-          unsigned long EEPROMStartAddress = 28;
+          unsigned int EEPROMStartAddress = 28;
           EEPROM.put(EEPROMStartAddress + i * sizeof(calDeg[0]), calDeg[i + 1]); // write the value stored in calDeg array in the corresponding EEPROM address
         }
       }
@@ -547,7 +546,7 @@ void loop()
     }
 
     /* PID Manual Calibration */
-    unsigned long nowCalibrationDegPID = millis();
+    unsigned int nowCalibrationDegPID = millis();
     if (ch4Value > 50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
     {
       PIDCalibration = true;
@@ -654,7 +653,7 @@ void loop()
      If the next loops the timer still meets the condition it will keep using the sinusoidal modulation, otherwise it will stop once a peak is reached and wait for the next timer to be satisfied, once satisfied it will wait for a peak again
     */
     int motorThrottleDerivative = maxMotorThrottle * cos((angPos - motorsCalibrationDegRaw) * PI / 180.0); // derivative of motorThrottle to know when the peak is reached, this is when the sinusoidal modulation will be used for tra
-    unsigned int TimeBetweenActivations = map(std::abs(ch2Value), 0, 1000, minTimeBetweenActivations, 0);  // send more activations if the ch2 value is bigger
+    unsigned int TimeBetweenActivations = map(std::abs(ch2Value), 0, 1000, maxTimeBetweenActivations, 0);  // send more activations if the ch2 value is bigger
     unsigned int motorTimeNow = millis();
     unsigned int elapsedMotorTime = motorTimeNow - lastMotorActivation;
     if (elapsedMotorTime > TimeBetweenActivations) // if enough time has passed since last activation
@@ -705,7 +704,7 @@ void loop()
       firstRun = false;
     }
 
-    unsigned long nowTest = millis();       // millis reference
+    unsigned int nowTest = millis();       // millis reference
     if (periodSeconds < previousPeriodTest) // if the new period is maller than the last written one
     {
       if (nowTest - lastEepromWriteTest > 300) // and if 300ms passed to not use eeprom too many times.
@@ -773,7 +772,7 @@ void loop()
   Serial.print(" m/s^2    \r");
 #endif
 #ifdef LOOPFREQUENCY
-  unsigned long elapsedtime = micros() - start;
+  unsigned int elapsedtime = micros() - start;
   delay(50);
   Serial.print(1 / (elapsedtime * 1e-6));
   Serial.print("  frequency          ");
