@@ -71,7 +71,7 @@ bool failsafeOn = false;
 bool reversed = false;
 bool peakReached = false;
 
-int targetThrottle = 0;
+int motorOutput = 0;
 int lastMotorDerivative = 0;
 int previousCh4Value = 0;
 
@@ -94,16 +94,17 @@ double calRangeRPM = maxCalRPM - minCalRPM;
 
 /* constants */
 const double SQRT2 = 1.41421356;
-const int maxMotorThrottle = 1000;
+const double maxMotorThrottle = 1000.0;
+const double degToRad = PI / 180.0;
 
 /* PID library */
 double RPMgoal;     // your setpoint
 double RPM;         // measured RPM from sensor
-double motorOutput; // PID output, 0..1000, double because the PID library expects doubles
+double targetThrottle; // PID output, 0..1000, double because the PID library expects doubles
 
 double consKp = 0, consKi = 0, consKd = 0;                               // conservative tuning when close to the desired range
 double aggKp = 0, aggKi = 0, aggKd = 0;                                  // aggressive tuning when far from the desired range
-PID myPID(&RPM, &motorOutput, &RPMgoal, consKp, consKi, consKd, DIRECT); // initializing PID parameters
+PID myPID(&RPM, &targetThrottle, &RPMgoal, consKp, consKi, consKd, DIRECT); // initializing PID parameters
 
 /* Point interpolation library */
 const uint8_t numberOfPoints = 5;      // number of points
@@ -433,6 +434,10 @@ void loop()
   // same for ch6
   if (ch3Value == 0) // tank mode, CH3 is deadbanded for the first 5 values so they result in 0
   {
+    if (receiverValue[5] > 1500) // motors are reversed with a switch, when the robot flips over
+    {
+      ch1Value = -ch1Value;
+    }
     mixEscSignals(ch1Value, ch2Value);
     if (failsafeOn == true) // if failsafe is on the led is always off
     {
@@ -444,11 +449,7 @@ void loop()
     }
     delayMicroseconds(1000); // slow down the loop, speed is not required in this case
 
-    if (receiverValue[5] < 1500) // motors are reversed with a switch, when the robot flips over
-    {
-      ch1Value = -ch1Value;
-      ch2Value = -ch2Value;
-    }
+
 
     noInterrupts();
     throttle1 = convertThrottle(-ch1Value); // changing the sign inverts the motor
@@ -472,23 +473,22 @@ void loop()
     /* Angular position drift calibration and directional LED stick control */
     unsigned int now = micros();
     unsigned int driftFreq = periodSeconds / 200; // how many times every rotation it will be applied. if the loop runs at 10kHz and the robot is at 200rpm you get a max of 300 frames per revolution
-    if (now - lastTimeDrift > driftFreq)           // drift calibration needs to be in function of rotations. so every rotation a certain amout of degrees is added/subtracted
+    if (now - lastTimeDrift > driftFreq * 1000)           // drift calibration needs to be in function of rotations. so every rotation a certain amout of degrees is added/subtracted
     {
+      if (reversed == true)
+      {
+        deltaDeg += mapDouble(ch1Value, -1000, 1000, 0.07, -0.07); // directional led stick control
+      }
+      else
+      {
+        deltaDeg -= mapDouble(ch1Value, -1000, 1000, 0.07, -0.07);
+      }
+      lastTimeDrift = now;
+    }
       if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
       {
         radius = mapDouble(receiverValue[4], 1000, 2000, 0.02, 0.07); // edit the radius size, since the only variable that can add a costant drift is the radius when calculating angular velocity
       }
-
-      if (reversed == true)
-      {
-        deltaDeg += map(ch1Value, -1000, 1000, 100, -100); // directional led stick control
-      }
-      else
-      {
-        deltaDeg -= map(ch1Value, -1000, 1000, 100, -100);
-      }
-      lastTimeDrift = now;
-    }
 
     /* Angular position evaluation and wrapping */
     angPos += deltaDeg; // angular position counting
@@ -547,7 +547,7 @@ void loop()
 
     /* PID Manual Calibration */
     unsigned int nowCalibrationDegPID = millis();
-    if (ch4Value > 50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
+    if (ch4Value < 50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
     {
       PIDCalibration = true;
       startCalibrationDegPID = nowCalibrationDegPID;
@@ -626,7 +626,7 @@ void loop()
     motorThrottle = -maxMotorThrottle  if          motorThrottle<-maxMotorThrottle
     */
     double motorPulseWidth = mapDouble(RPM, 0.0, maxRPM, minChosenMotorPulseWidth, maxChosenMotorPulseWidth); // the pulse width gets bigger as the rpm increases to account for the delays in the motor response
-    int motorThrottle = maxMotorThrottle * (sin((angPos - motorsCalibrationDegRaw) * PI / 180.0) + cos((motorPulseWidth / 2) * PI / 180.0));
+    int motorThrottle = maxMotorThrottle * (sin((angPos - motorsCalibrationDegRaw) * degToRad) + cos((motorPulseWidth / 2) * degToRad));
 
     if (motorThrottle > targetThrottle)
     {
@@ -652,13 +652,13 @@ void loop()
      If the value goes from positive from negative, so when a peak is reached, it will start using the sinusoidal modulation.
      If the next loops the timer still meets the condition it will keep using the sinusoidal modulation, otherwise it will stop once a peak is reached and wait for the next timer to be satisfied, once satisfied it will wait for a peak again
     */
-    int motorThrottleDerivative = maxMotorThrottle * cos((angPos - motorsCalibrationDegRaw) * PI / 180.0); // derivative of motorThrottle to know when the peak is reached, this is when the sinusoidal modulation will be used for tra
+    double motorThrottleDerivative = maxMotorThrottle * cos((angPos - motorsCalibrationDegRaw) * degToRad); // derivative of motorThrottle to know when the peak is reached, this is when the sinusoidal modulation will be used for tra
     unsigned int TimeBetweenActivations = map(std::abs(ch2Value), 0, 1000, maxTimeBetweenActivations, 0);  // send more activations if the ch2 value is bigger
     unsigned int motorTimeNow = millis();
     unsigned int elapsedMotorTime = motorTimeNow - lastMotorActivation;
     if (elapsedMotorTime > TimeBetweenActivations) // if enough time has passed since last activation
     {
-      if (lastMotorDerivative >= 0 && motorThrottleDerivative < 0) // if the peak of the sinusoidal modulation is reached, this means that the motor is in the best position to be activated for a translation aka using sinusoidal modulation
+      if (lastMotorDerivative >= 0 && motorThrottleDerivative <= 0) // if the peak of the sinusoidal modulation is reached, this means that the motor is in the best position to be activated for a translation aka using sinusoidal modulation
       {
         if(peakReached == true){
           lastMotorActivation = motorTimeNow; 
@@ -678,7 +678,7 @@ void loop()
 
     /* reverse the rotation direction */
     int signal2 = motorThrottle; // it is mapped from 0 to 1000 so it is rotating only in a single direction
-    int signal1 = signal2;
+    int signal1 = targetThrottle;
     if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
     {
       reversed = false;
@@ -695,7 +695,7 @@ void loop()
     throttle1 = convertThrottle(signal1);
     throttle2 = convertThrottle(signal2);
     interrupts(); // restart the ISR
-
+  
 #ifdef GETMAXRPM
 
     if (firstRun)
@@ -730,7 +730,7 @@ void loop()
   Serial.print(ch1Value);
   Serial.print("  ch1Value       ");
   Serial.print(ch3Value);
-  Serial.print("  ch3Value       ");
+  Serial.print("  ch3Value       "); 
   Serial.print(ch4Value);
   Serial.print("  ch4Value      \r ");
 #endif

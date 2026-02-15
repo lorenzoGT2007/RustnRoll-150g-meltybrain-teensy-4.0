@@ -13,5 +13,6 @@
         "functional": "cpp",
         "tuple": "cpp",
         "utility": "cpp"
-    }
+    },
+    "cmake.sourceDirectory": "C:/Users/loryt/OneDrive/Desktop/Coding/VS_Code/1. Battlebots/RustnRoll 150g meltybrain teensy 4.0/lib/Adafruit_BusIO-master/Adafruit_BusIO-master"
 }
