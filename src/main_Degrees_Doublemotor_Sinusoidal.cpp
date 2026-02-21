@@ -628,10 +628,16 @@ void loop()
     */
     double motorPulseWidth = mapDouble(RPM, 0.0, maxRPM, minChosenMotorPulseWidth, maxChosenMotorPulseWidth); // the pulse width gets bigger as the rpm increases to account for the delays in the motor response
     long int motorThrottle = (maxMotorThrottle/(1+cos((motorPulseWidth/2)*degToRad))) * (sin((angPos - motorsCalibrationDegRaw) * degToRad) + cos((motorPulseWidth / 2) * degToRad));
+    long int motorThrottle2 = (maxMotorThrottle/(1+cos((motorPulseWidth/2)*degToRad))) * (sin((angPos - motorsCalibrationDegRaw - 180.0) * degToRad) + cos((motorPulseWidth / 2) * degToRad)); //second motor activates 180 degrees out of phase with the first one
 
     if (motorThrottle < -maxMotorThrottle)
     {
       motorThrottle = -maxMotorThrottle;
+    }
+
+    if (motorThrottle2 < -maxMotorThrottle)
+    {
+      motorThrottle2 = -maxMotorThrottle;
     }
     /*
     if the targetthrottle <= maxMotorThrottle is correctly constrained in the PID evaluation or just as max if directly scaled from a channel value, the condition
@@ -660,6 +666,7 @@ void loop()
     else if (peakReached == false) // if the peak is yet not reached it won't use the sinusoidal modulation, and will wait until the next peak
     {
       motorThrottle = targetThrottle;
+      motorThrottle2 = targetThrottle;
     }
 
     if (peakReached == true && std::abs(ch2Value) <= 200) // once the directional stick is near zero it will wait for the next peak before stopping using sinusoidal modulation
@@ -671,7 +678,7 @@ void loop()
     }
 
     /* reverse the rotation direction */
-    int signal2 = targetThrottle;// it is mapped from 0 to 1000 so it is rotating only in a single direction
+    int signal2 = motorThrottle2;// it is mapped from 0 to 1000 so it is rotating only in a single direction
     int signal1 = motorThrottle;//this is the value for translation
     if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
     {
