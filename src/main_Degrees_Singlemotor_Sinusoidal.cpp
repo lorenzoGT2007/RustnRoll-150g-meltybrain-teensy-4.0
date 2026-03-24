@@ -46,19 +46,19 @@ EEPROM used addresses: 0-3 getmaxRPM (4 Byte), 4-11 Kp (8B), 12-19 Ki (8B), 20-2
 
 #ifdef GETMAXRPM
 bool firstRun = true;
-unsigned int previousPeriodTest = 0;
+double previousPeriodTest = 0;
 unsigned int lastEepromWriteTest = 0;
+float periodSecondsF = 0.0f;
 #endif
 
 /* values that need to be manually inserted */
 const double minChosenMotorPulseWidth = 15.0;                   // in degrees, this value will be directly scaled as the RPM increases
-constexpr double maxChosenMotorPulseWidth = 345.0;                  // in degrees, can't be bigger than 355 degrees because the sinusoidal function would overflow
+constexpr double maxChosenMotorPulseWidth = 345.0;              // in degrees, can't be bigger than 355 degrees because the sinusoidal function would overflow
 const double chosenLedWidth = 40.0;                             // in degrees
 double radius = 0.0473;                                         // meters, this is not a constant because it is used as a calibration value for the led drift
 const double maxRPM = 3500.0;                                   // max goal rpm that will be used for full ch3 throttle, in the case of 2300 a number like 2000 as max is recommended
 const unsigned int maxCalRPM = 2500;                            // max rpm for calibration
 const unsigned int minCalRPM = 1000;                            // min rpm for calibration
-const unsigned int maxTimeBetweenActivations = 500;             // in ms, it's the max time that needs to pass between each motor activation, this will be the max value possible once mapped to ch2
 const unsigned int periodSecondsISR = 100;                      // period that sets the frequency of the isr for motor throttle
 const int recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
@@ -71,14 +71,11 @@ bool failsafeOn = false;
 bool reversed = false;
 bool peakReached = false;
 
-int motorOutput = 0;
-int lastMotorDerivative = 0;
 int previousCh4Value = 0;
 
 uint8_t PIDcoeff = 1;
 uint8_t calPoint = 1;
 
-unsigned int lastMotorActivation = 0;
 unsigned int failsafeTimer = 0;
 unsigned int initialMicros = 0;
 unsigned int lastTimeDrift = 0;
@@ -91,6 +88,7 @@ double angPos = 0;
 double periodSeconds = 0;
 double motorsCalibrationDegRaw = 0;
 double calRangeRPM = maxCalRPM - minCalRPM;
+double lastMotorDerivative = 0;
 
 /* constants */
 const double SQRT2 = 1.41421356;
@@ -142,29 +140,29 @@ int receiverValue[] = {0, 0, 0, 0, 0, 0, 0, 0}; // array for channels values
 int ChannelNumber = 0;
 
 /* interrupt function for motor throttle */
-volatile uint16_t throttle1 = 1048;
-volatile uint16_t throttle2 = 1048;
+volatile uint16_t throttle1 = 0;
+volatile uint16_t throttle2 = 0;
 
-static_assert(maxChosenMotorPulseWidth <= 355.0, 
-  "CRITICAL ERROR: maxChosenMotorPulseWidth is too high and will cause a long int overflow!");//this is done to avoid overflows, the code will not compile
+static_assert(maxChosenMotorPulseWidth <= 355.0,
+              "CRITICAL ERROR: maxChosenMotorPulseWidth is too high and will cause a long int overflow!"); // this is done to avoid overflows, the code will not compile
 
 void updateThrottle()
 {
   ESC1.sendThrottle(throttle1, false); // 0 min to 2000 max. the first 48 values are for esc setup. center value between min and max is 1000
-  ESC2.sendThrottle(throttle2, false); //(throttle value, telemetry from esc requested)
+  ESC2.sendThrottle(throttle2, false); //(throttle value, telemetry from esc not requested)
 }
 
 void setup()
 {
 
-#if defined(SERIALCHECKchannels_LOOP) || defined(SERIALCHECK2_LOOP) || defined(SERIALCHECK1_SETUP) || defined(GETMAXRPM) || defined(LOOPFREQUENCY) || defined(SERIALCHECKPID) || defined(SERIALCHECKDEGCAL)
+#if defined(SERIALCHECKchannels_LOOP) || defined(SERIALCHECK2_LOOP) || defined(SERIALCHECK1_SETUP) || defined(GETMAXRPM) || defined(LOOPFREQUENCY) || defined(SERIALCHECKPID) || defined(SERIALCHECKDEGCAL) || defined(MOTOR_OUTPUT)
   Serial.begin(115200);
 #endif
 
   while (!accel.begin_SPI(H3LIS331_CS)) // wait until the accelerometer is found
   {
     digitalWrite(pinLED, HIGH); // turn on LED while waiting for the accelerometer to be found
-    delay(1000);
+    delay(10);
   }
 
   accel.setRange(H3LIS331_RANGE_400_G);
@@ -197,7 +195,7 @@ void setup()
 #endif
   }
 
-  for (size_t i = 0; i < 4000; i++) // arming sequence for ESC using dshot
+  for (size_t i = 0; i < 500; i++) // arming sequence for ESC using dshot
   {
     ESC1.sendCommand(0, false); // 0 command MUST be sent for dshot arming
     ESC2.sendCommand(0, false);
@@ -225,12 +223,12 @@ void setup()
 
 #ifdef GETMAXRPM
   delay(10000); // wait so you have time to connect to serial once turned on
-  EEPROM.get(0, periodSeconds);
-  unsigned int rpm = 60.0 * 1000000.0 / periodSeconds;
+  EEPROM.get(0, periodSecondsF);
+  unsigned int rpm = 60.0 / periodSecondsF;
   Serial.print(rpm);
   Serial.print(" rpm    ");
-  Serial.print(periodSeconds);
-  Serial.println(" Period Us");
+  Serial.print(periodSecondsF);
+  Serial.println(" Period seconds");
 #endif
 
 #ifdef SERIALCHECK1_SETUP
@@ -247,7 +245,6 @@ void setup()
   Serial.println("H3LIS331 found!");
 
   Serial.print("Range set to: ");
-  accel.setRange(H3LIS331_RANGE_200_G);
   switch (accel.getRange())
   {
   case H3LIS331_RANGE_100_G:
@@ -299,6 +296,7 @@ void setup()
   }
 
 #endif
+  initialMicros = micros(); // this way the first angualar variation is not massive since the time elapsed would be the whole setup
 }
 
 void failsafe()
@@ -459,6 +457,11 @@ void loop()
   }
   else if (ch3Value > 0 && ch3Value <= 1000) // spin mode, the last else is for failsafe
   {
+    /* drift calibration, angpos and RPM evaluation */
+    if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
+    {
+      radius = mapDouble(receiverValue[4], 1000, 2000, 0.02, 0.07); // edit the radius size, since the only variable that can add a costant drift is the radius when calculating angular velocity
+    }
 
     deltaDeg = angularVariation(); // in degrees
 
@@ -471,10 +474,10 @@ void loop()
       RPM = 0;
     }
 
-    /* Angular position drift calibration and directional LED stick control */
+    /* directional LED stick control */
     unsigned int now = micros();
-    unsigned int driftFreq = periodSeconds / 200; // how many times every rotation it will be applied. if the loop runs at 10kHz and the robot is at 200rpm you get a max of 300 frames per revolution
-    if (now - lastTimeDrift > driftFreq * 1000)   // drift calibration needs to be in function of rotations. so every rotation a certain amout of degrees is added/subtracted
+    double driftFreq = periodSeconds / 200.0;  // how many times every rotation it will be applied. if the loop runs at 10kHz and the robot is at 200rpm you get a max of 300 frames per revolution
+    if (now - lastTimeDrift > driftFreq * 1e6) // this is done so the directional led stick control is at roughly the same speed on the whole rpm range
     {
       if (reversed == true)
       {
@@ -486,16 +489,13 @@ void loop()
       }
       lastTimeDrift = now;
     }
-    if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
-    {
-      radius = mapDouble(receiverValue[4], 1000, 2000, 0.02, 0.07); // edit the radius size, since the only variable that can add a costant drift is the radius when calculating angular velocity
-    }
 
     /* Angular position evaluation and wrapping */
-    angPos += deltaDeg; // angular position counting
-    if (angPos > 360.0) // wrap around if over 360 deg
+    angPos += deltaDeg;           // angular position counting
+    angPos = fmod(angPos, 360.0); // this way it can even wrap around twice or more
+    if (angPos < 0.0)             // this is done if the ledstick control gets it into the negatives
     {
-      angPos -= 360.0;
+      angPos += 360.0;
     }
 
     /* LED activation */
@@ -524,10 +524,6 @@ void loop()
         calPoint++;
       }
 
-      updateLedWidthCal(calRPM[calPoint]);                                                       // visual feedback of the calibration point you are on, the led width gets smaller as you get closer to the desired rpm range of that calibration point
-      motorsCalibrationDegRaw = mapDouble((double)receiverValue[4], 1000.0, 2000.0, 0.0, 360.0); // delay in degrees manually assigned at a certain rpm range
-      calDeg[calPoint] = motorsCalibrationDegRaw;                                                // assign the deg value to the current point that is being calibrated
-
       if (calPoint > numberOfPoints - 1) // 1 is subtracted since numberOfPoints includes the 0 too
       {
         degCalibration = false;
@@ -539,6 +535,12 @@ void loop()
           EEPROM.put(EEPROMStartAddress + i * sizeof(calDeg[0]), calDeg[i + 1]); // write the value stored in calDeg array in the corresponding EEPROM address
         }
       }
+      else
+      {
+        updateLedWidthCal(calRPM[calPoint]);                                                       // visual feedback of the calibration point you are on, the led width gets smaller as you get closer to the desired rpm range of that calibration point
+        motorsCalibrationDegRaw = mapDouble((double)receiverValue[4], 1000.0, 2000.0, 0.0, 360.0); // delay in degrees manually assigned at a certain rpm range
+        calDeg[calPoint] = motorsCalibrationDegRaw;                                                // assign the deg value to the current point that is being calibrated
+      }
     }
     else if ((ch4Value < -50 || ch4Value > 50) && degCalibratingNow == false) // if the first "if" is waiting for the timer to be true but the ch4 changes everything resets
     {
@@ -548,7 +550,7 @@ void loop()
 
     /* PID Manual Calibration */
     unsigned int nowCalibrationDegPID = millis();
-    if (ch4Value < 50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
+    if (ch4Value < -50 && PIDCalibration == false && degCalibratingNow == false) // starts counting timer to start PID calibration
     {
       PIDCalibration = true;
       startCalibrationDegPID = nowCalibrationDegPID;
@@ -567,7 +569,7 @@ void loop()
       case 1:
         consKp = mapDouble(receiverValue[4], 1000.0, 2000.0, 0.0, 10.0); // in PID Kp defines how aggressively the PID reacts to the current error with respect to the setpoint
         aggKp = consKp * 1.6;
-        ledWidth = 180'000;
+        ledWidth = 180;
         consKi = 0;
         consKd = 0;
         aggKi = 0;
@@ -576,12 +578,12 @@ void loop()
       case 2:
         consKi = mapDouble(receiverValue[4], 1000, 2000, 0, 50); // in PID Ki defines how aggressively the PID reacts to the sum of all previous errors with respect to the setpoint
         aggKi = consKi * 1.2;
-        ledWidth = 90'000;
+        ledWidth = 90;
         break;
       case 3:
         consKd = mapDouble(receiverValue[4], 1000, 2000, 0, 10); // in PID Kd defines how aggressively the PID reacts to the prediction of future errors with respect to the setpoint
         aggKd = consKd * 1.2;
-        ledWidth = 10'000;
+        ledWidth = 10;
         break;
       default:
         PIDcalibratingNow = false;
@@ -593,7 +595,7 @@ void loop()
         break;
       }
     }
-    else if (ch4Value < 50 && PIDcalibratingNow == false) // if the first "if" is waiting for the timer to be true but the ch4 changes everything resets
+    else if (ch4Value > -50 && PIDcalibratingNow == false) // if the first "if" is waiting for the timer to be true but the ch4 changes everything resets
     {
       PIDCalibration = false;
     }
@@ -605,7 +607,7 @@ void loop()
     }
 
     /* Decide to use aggressive PID or conservative PID and compute target Throttle*/
-    RPMgoal = map(ch3Value, 0, 1000, 0, maxRPM);
+    RPMgoal = mapDouble((double)ch3Value, 0.0, 1000.0, 0.0, maxRPM);
     double gap = std::abs(RPMgoal - RPM);
     if (gap < 1000.0)
     { // close to setpoint
@@ -626,8 +628,12 @@ void loop()
     motorThrottle = maxMotorThrottle   if          motorThrottle>maxMotorThrottle. this is not possible to happen with this function, only if instead of (maxMotorThrottle/(1+cos(motorPulseWidth/2))), this is used: maxMotorThrottle
     motorThrottle = -maxMotorThrottle  if          motorThrottle<-maxMotorThrottle
     */
+    if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else, the motorsCalibrationDegRaw is computed with the interpolation function, so it gives the correct value to use in the motor throttle function based on the current RPM
+    {
+      motorsCalibrationDegRaw = Interpolation::Linear(calRPM, calDeg, numberOfPoints, RPM, true); // this is the interpolation function that gives the calibrated deg value to use in the motor throttle function based on the current RPM
+    }
     double motorPulseWidth = mapDouble(RPM, 0.0, maxRPM, minChosenMotorPulseWidth, maxChosenMotorPulseWidth); // the pulse width gets bigger as the rpm increases to account for the delays in the motor response
-    long int motorThrottle = (maxMotorThrottle/(1+cos((motorPulseWidth/2)*degToRad))) * (sin((angPos - motorsCalibrationDegRaw) * degToRad) + cos((motorPulseWidth / 2) * degToRad));
+    long int motorThrottle = (maxMotorThrottle / (1 + cos((motorPulseWidth / 2) * degToRad))) * (sin((angPos - motorsCalibrationDegRaw) * degToRad) + cos((motorPulseWidth / 2) * degToRad));
 
     if (motorThrottle < -maxMotorThrottle)
     {
@@ -657,23 +663,24 @@ void loop()
         peakReached = true;
       }
     }
-    else if (peakReached == false) // if the peak is yet not reached it won't use the sinusoidal modulation, and will wait until the next peak
+    if (peakReached == false) // if the peak is yet not reached it won't use the sinusoidal modulation, and will wait until the next peak
     {
       motorThrottle = targetThrottle;
     }
 
     if (peakReached == true && std::abs(ch2Value) <= 200) // once the directional stick is near zero it will wait for the next peak before stopping using sinusoidal modulation
     {
-      if (lastMotorDerivative >= 0 && motorThrottleDerivative <= 0) 
+      if (lastMotorDerivative >= 0 && motorThrottleDerivative <= 0)
       {
         peakReached = false;
       }
     }
+    lastMotorDerivative = motorThrottleDerivative;
 
     /* reverse the rotation direction */
-    int signal2 = targetThrottle;// it is mapped from 0 to 1000 so it is rotating only in a single direction
-    int signal1 = motorThrottle;//this is the value for translation
-    if (receiverValue[5] > 1500) // depending on the switch in ch6 spin is decided, when the robot flips over
+    int signal2 = targetThrottle; // it is mapped from 0 to 1000 so it is rotating only in a single direction
+    int signal1 = motorThrottle;  // this is the value for translation
+    if (receiverValue[5] > 1500)  // depending on the switch in ch6 spin is decided, when the robot flips over
     {
       reversed = false;
     }
@@ -703,7 +710,8 @@ void loop()
     {
       if (nowTest - lastEepromWriteTest > 300) // and if 300ms passed to not use eeprom too many times.
       {
-        EEPROM.put(0, periodSeconds); // write the new value in eeprom
+        periodSecondsF = (float)(periodSeconds); // saved as a float so eeprom doesn't overflow
+        EEPROM.put(0, periodSecondsF);           // write the new value in eeprom
         previousPeriodTest = periodSeconds;
         lastEepromWriteTest = nowTest;
       }
