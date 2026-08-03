@@ -1,3 +1,60 @@
+/* ============================================================================
+   RUST'N'ROLL 150g MELTYBRAIN — MAIN FIRMWARE (Teensy 4.0)
+   Single motor translation driven by sinusoidal throttle modulation + PID RPM control.
+
+   This is THE main build of the robot. Every test_*.cpp file in src/ is an
+   experimental variant; each file compiles from its own PlatformIO environment
+   (see platformio.ini). This one is the default:
+
+       pio run -e Degrees_Singlemotor_Sinusoidal
+
+   ============================================================================
+   CONTROLLER GUIDE (sticks / switches / knobs)
+   ============================================================================
+   CH1 (stick, left/right):
+       - tank mode: steering
+       - spin mode: rotates the LED heading line left/right (heading trim)
+   CH2 (stick, forward/back):
+       - tank mode: forward/backwards
+       - spin mode: translation. past the stick threshold the motor throttle is
+         modulated with a sinewave synchronized with the heading
+   CH3 (throttle knob): spin RPM target. at zero = tank mode, above the deadband
+       = spin mode, full = maxRPM
+   CH4 (3-position switch): calibration control, only works in spin mode
+       - hold MIDDLE for 3s -> motor advance (deg) calibration starts
+       - hold LOW    for 3s -> PID calibration starts
+       - while calibrating, every flip to a different position advances to the
+         next point/coefficient
+   CH5 (knob):
+       - normal spinning: radius trim (0.02 - 0.07 m), turn it until the LED
+         heading line stops drifting
+       - deg calibration: sets the advance angle (0 - 360 deg) of the current point
+       - PID calibration: sets the current coefficient value
+   CH6 (2-position switch): spin/motor direction, flip it when the robot is
+       driving upside down
+
+   MOTOR ADVANCE (DEG) CALIBRATION - point RPM targets: 1375 / 1750 / 2125 / 2500
+       1. enter spin mode, hold CH4 in the MIDDLE for 3 seconds -> point 1 is active
+       2. bring the RPM close to the point target with CH3: the LED line gets
+          NARROWER the closer you are
+       3. turn CH5 until the robot translates in the direction of the LED line
+          (push CH2 to test)
+       4. flip CH4 to any other position -> next point
+       5. after setting the 4th point, one more flip saves everything to EEPROM
+          and exits
+
+   PID CALIBRATION - LED width shows the active coefficient:
+   Kp = 180 deg, Ki = 90 deg, Kd = 10 deg
+       1. enter spin mode, hold CH4 LOW for 3 seconds -> Kp is active (Ki and Kd
+          are reset to 0 here)
+       2. set the value with CH5 (Kp: 0-10, Ki: 0-50, Kd: 0-10)
+       3. flip CH4 -> Ki, flip again -> Kd
+       4. one more flip saves Kp/Ki/Kd to EEPROM and exits
+
+   FAILSAFE: after 1s without receiver signal the controls are neutralized
+   (motors stop, LED off in tank mode)
+   ============================================================================ */
+
 /* Notes:
 Motor dshot (edited library): 0 = full stop, 1 - 1000 spin clockwise, 1001 - 2000 spin counterclockwise
 
@@ -35,6 +92,9 @@ EEPROM used addresses: 0-3 getmaxRPM (4 Byte), 4-11 Kp (8B), 12-19 Ki (8B), 20-2
 #include <PID_v1.h>
 #include <InterpolationLib.h>
 
+/* ------------------------- serial debug switches --------------------------
+   uncomment one or more to enable the matching Serial prints (Serial is
+   started automatically in setup when any of these is defined) */
 // #define SERIALCHECKaccelerometer_LOOP // accelerometer values printed out
 // #define SERIALCHECKchannels_LOOP // all channel raw data (us)
 // #define SERIALCHECK2_LOOP // channels mapped data
@@ -51,7 +111,7 @@ unsigned int lastEepromWriteTest = 0;
 float periodSecondsF = 0.0f;
 #endif
 
-/* values that need to be manually inserted */
+/* ==================== tunable values (edit these here) ==================== */
 const double minChosenMotorPulseWidth = 15.0;                   // in degrees, this value will be directly scaled as the RPM increases
 constexpr double maxChosenMotorPulseWidth = 345.0;              // in degrees, can't be bigger than 355 degrees because the sinusoidal function would overflow
 const double chosenLedWidth = 40.0;                             // in degrees
@@ -62,7 +122,7 @@ const unsigned int minCalRPM = 1000;                            // min rpm for c
 const unsigned int periodSecondsISR = 100;                      // period that sets the frequency of the isr for motor throttle
 const int recieverFailsafeValues[4] = {1500, 1500, 1000, 1000}; // values that will be set when reciever signal is lost. ch1, ch2, ch3, ch4
 
-/* global variables */
+/* ============================== global state ============================== */
 bool degCalibration = false;
 bool degCalibratingNow = false;
 bool PIDCalibration = false;
@@ -90,12 +150,12 @@ double motorsCalibrationDegRaw = 0;
 double calRangeRPM = maxCalRPM - minCalRPM;
 double lastMotorDerivative = 0;
 
-/* constants */
+/* =============================== constants ================================ */
 const double SQRT2 = 1.41421356;
 const double maxMotorThrottle = 1000.0;
 const double degToRad = PI / 180.0;
 
-/* PID library */
+/* ====================== PID (RPM -> target throttle) ====================== */
 double RPMgoal;        // your setpoint
 double RPM;            // measured RPM from sensor
 double targetThrottle; // PID output, 0..1000, double because the PID library expects doubles
@@ -104,12 +164,12 @@ double consKp = 0, consKi = 0, consKd = 0;                                  // c
 double aggKp = 0, aggKi = 0, aggKd = 0;                                     // aggressive tuning when far from the desired range
 PID myPID(&RPM, &targetThrottle, &RPMgoal, consKp, consKi, consKd, DIRECT); // initializing PID parameters
 
-/* Point interpolation library */
+/* ========= motor advance calibration points (interpolated vs RPM) ========= */
 const uint8_t numberOfPoints = 5;      // number of points
 double calRPM[numberOfPoints] = {0};   // RPM values for calibration points, they will be equally spaced between minCalRPM and maxCalRPM and computed in setup
 double calDeg[numberOfPoints] = {0.0}; // this will be filled later on with the values stored in eeprom
 
-/* Pin declarations */
+/* ============================ pins and hardware ============================ */
 const uint8_t pinESC1 = 1; // ESC pins. pin 1 = Serial1. pin 17 = Serial4
 const uint8_t pinESC2 = 17;
 const uint8_t pinCH1 = 14; // reciever signal PPM pin
@@ -175,6 +235,7 @@ void setup()
 
   ReceiverInput.begin(pinCH1); // begin communication with receiver
 
+  /* PID gains saved by the PID calibration procedure */
   EEPROM.get(4, consKp);
   EEPROM.get(12, consKi);
   EEPROM.get(20, consKd);
@@ -433,7 +494,9 @@ void loop()
   ch4Value = processChannelValue(receiverValue[3], -100, 100); // ch4 is slave to the 3 position switch. it evaluates to -100, 0 or 100
   // ch5 is for calibration so it won't be mapped to increase performance
   // same for ch6
-  if (ch3Value == 0) // tank mode, CH3 is deadbanded for the first 5 values so they result in 0
+  /* ================================ TANK MODE ================================
+     CH3 at zero (it is deadbanded, so the first few values still count as 0) */
+  if (ch3Value == 0)
   {
     if (receiverValue[5] > 1500) // motors are reversed with a switch, when the robot flips over
     {
@@ -455,7 +518,8 @@ void loop()
     throttle2 = convertThrottle(ch2Value);
     interrupts();
   }
-  else if (ch3Value > 0 && ch3Value <= 1000) // spin mode, the last else is for failsafe
+  /* ================================ SPIN MODE ================================ */
+  else if (ch3Value > 0 && ch3Value <= 1000)
   {
     /* drift calibration, angpos and RPM evaluation */
     if (!degCalibratingNow && !PIDcalibratingNow) // if not calibrating anything else
@@ -718,6 +782,7 @@ void loop()
     }
 #endif
   }
+  /* ========================= SAFETY STOP (bad CH3) ========================== */
   else // safety stop without any esc signal on ch3 using PPM
   {
     noInterrupts();
@@ -725,6 +790,7 @@ void loop()
     throttle2 = 0;
     interrupts();
   }
+  /* ------- debug prints, enabled by the switches at the top of the file ------- */
 #ifdef SERIALCHECK2_LOOP
   delay(50);
   Serial.print(ch2Value);
